@@ -1,0 +1,198 @@
+<link rel="import" href="../connector.html">
+
+<script>
+
+    /**
+     *
+     */
+    class MangaRock extends Connector {
+
+        /**
+         *
+         */
+        constructor() {
+            super();
+            // Public members for usage in UI (mandatory)
+            super.id         = 'mangarock';
+            super.label      = 'MangaRock';
+            this.tags        = [ 'manga', 'english' ];
+            super.isLocked   = false;
+            this.initialized = undefined;
+            // Private members for internal usage only (convenience)
+            this.url         = 'https://api.mangarockhd.com';
+            this.requestOptions.headers.set( 'content-type', 'application/json' );
+            this.requestOptions.headers.set( 'x-origin', 'https://mangarock.com' );
+            this.pageLock      = 0;
+            this.pageLockDelay = 500;
+            // Private members for internal use that can be configured by the user through settings menu (set to undefined or false to hide from settings menu!)
+            this.config = undefined;
+
+            // register a protocol handler to intercept requests (with custom 'mangafox' protocol) and extract images
+            Engine.Request.registerProtocol( this.id, this._pageProtocolHandler.bind( this ) );
+        }
+
+        _getJsonResponse( response, type ) {
+            if( response.status !== 200 ) {
+                throw new Error( `Failed to receive ${type} list (status: ${response.status}) - ${response.statusText}` );
+            }
+            return response.json()
+            .then( data => {
+                if( data.code !== 0 ) {
+                    throw new Error( this.label + ' error: ' + data.code );
+                }
+                return Promise.resolve( data.data );
+            } );
+        }
+
+        /**
+         *
+         */
+        _getMangaList( callback ) {
+            this.requestOptions.method = 'POST';
+            this.requestOptions.body = JSON.stringify( {
+                genres: {},
+                order: 'name',
+                rank: 'all',
+                status: 'all'
+            } );
+            fetch( this.url + '/query/web401/mrs_filter', this.requestOptions )
+            .then( response => {
+                return this._getJsonResponse( response, 'manga' );
+             } )
+            .then( data => {
+                if( data.includes( '' ) ) {
+                    throw new Error( 'The manga list provided by the server contains one or more empty entries!' );
+                }
+                // NOTE: mangarock limits the amount of manga requests => split into 5k queries
+                let promises = [];
+                while( data.length > 0 ) {
+                    this.requestOptions.body = JSON.stringify( data.splice( 0, 5000 ) );
+                    promises.push(
+                        fetch( this.url + '/meta', this.requestOptions )
+                        .then( response => this._getJsonResponse( response, 'manga' ) )
+                    );
+                }
+                return Promise.all( promises );
+            } )
+            .then( data => {
+                let object2array = ( value ) => {
+                    return Object.entries( value ).map( kvp => {
+                        return {
+                            id: kvp[1].oid,
+                            title: kvp[1].name
+                        };
+                    } );
+                };
+                let mangaList = data.reduce( ( accumulator, value ) => accumulator.concat( object2array( value ) ), [] );
+                callback( null, mangaList );
+            } )
+            .catch( error => {
+                console.error( error, this );
+                callback( error, undefined );
+            } );
+        }
+
+        /**
+         *
+         */
+        _getChapterList( manga, callback ) {
+            this.requestOptions.method = 'GET';
+            this.requestOptions.body = undefined;
+            fetch( this.url + '/query/web401/info?oid=' + manga.id, this.requestOptions )
+            .then( response => this._getJsonResponse( response, 'chapter' ) )
+            .then( data => {
+                let chapterList = data.chapters.reverse().map( chapter => {
+                    return {
+                        id: chapter.oid,
+                        title: chapter.name,
+                        language: 'en'
+                    };
+                } );
+                callback( null, chapterList );
+            } )
+            .catch( error => {
+                console.error( error, manga );
+                callback( error, undefined );
+            } );
+        }
+
+        /**
+         *
+         */
+        _getPageList( manga, chapter, callback ) {
+            this.requestOptions.method = 'GET';
+            this.requestOptions.body = undefined;
+            fetch( this.url + '/query/web401/pages?oid=' + chapter.id, this.requestOptions )
+            .then( response => this._getJsonResponse( response, 'page' ) )
+            .then( data => {
+                let pageList = data.map( link => {
+                    let uri = new URL( link );
+                    uri.protocol = this.id;
+                    return uri.href;
+                } );
+                callback( null, pageList );
+            } )
+            .catch( error => {
+                console.error( error, chapter );
+                callback( error, undefined );
+            } );
+        }
+
+        /**
+         *
+         */
+        _pageProtocolHandler( request, callback ) {
+            this.requestOptions.method = 'GET';
+            this.requestOptions.body = undefined;
+            let uri = new URL( request.url );
+            uri.protocol = ( new URL( this.url ) ).protocol;
+            fetch( uri.href, this.requestOptions )
+            .then( response => {
+                if( response.status !== 200 ) {
+                    throw new Error( `Failed to receive page (status: ${response.status}) - ${response.statusText}` );
+                }
+                // promises nested intentionally to give innerpromise access to scoped response.headers
+                return response.arrayBuffer()
+                .then( data => {
+                    data = new Uint8Array( data );
+                    if( data[0] === 69 ) {
+                        return this._decryptImage( data, 0x65, 'image/webp' );
+                    } else {
+                        return Promise.resolve( {
+                            mimeType: response.headers.get( 'content-type' ),
+                            data: data
+                        } );
+                    }
+                } );
+            } )
+            .then( data => {
+                callback( data );
+            } )
+            .catch( error => {
+                console.error( error, uri.href );
+                callback( error, undefined );
+            } );
+        }
+
+        /**
+         *
+         */
+        _decryptImage( encrypted, key, mime ) {
+            return new Promise( ( resolve, reject ) => {
+                let decrypted = new Uint8Array( encrypted.length + 15 );
+                let n = encrypted.length + 7;
+                let header = Uint8Array.of( 82, 73, 70, 70, n & 255, n >> 8 & 255, n >> 16 & 255, n >> 24 & 255, 87, 69, 66, 80, 86, 80, 56 );
+                let data = encrypted.map( byte => {
+                    return ( key ^ byte );
+                } );
+                decrypted.set( header, 0 );
+                decrypted.set( data, header.length );
+                resolve( {
+                    mimeType: mime,
+                    data: decrypted
+                } );
+            } );
+        }
+    }
+
+</script>

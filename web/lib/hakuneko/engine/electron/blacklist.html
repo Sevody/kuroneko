@@ -1,0 +1,83 @@
+<script>
+
+    /**
+     * 
+     */
+    class Blacklist {
+        // https://developer.chrome.com/extensions/match_patterns
+        // https://developer.mozilla.org/en-US/Add-ons/WebExtensions/Match_patterns
+        constructor() {
+            this.patterns = [
+                '*://*.2mdnsys.com/*',
+                '*://*.360yield.com/*',
+                '*://*.accounts.google.com/*',
+                '*://*.addthis.com/*',
+                '*://*.addthisedge.com/*',
+                '*://*.adform.net/*',
+                '*://*.admixer.net/*',
+                '*://*.adnxs.com/*',
+                '*://*.adriver.ru/*',
+                '*://*.adservice.google.com/*',
+                '*://*.adsrvr.org/*',
+                '*://*.advertising.com/*',
+                '*://*.apis.google.com/*',
+                '*://*.bidgear.com/*',
+                '*://*.buysellads.com/*',
+                '*://*.casalemedia.com/*',
+                '*://*.chatango.com/*',
+                //'*://*.cloudfront.net/*',
+                '*://*.cnzz.com/*',
+                '*://*.cobalten.com/*',
+                '*://*.connectad.io/*',
+                '*://*.consensu.org/*',
+                '*://*.contextweb.com/*',
+                '*://*.contributor.google.com/*',
+                '*://*.criteo.net/*',
+                '*://*.doubleclick.net/*',
+                '*://*.elasticad.net/*',
+                '*://*.facebook.com/*',
+                '*://*.facebook.net/*',
+                '*://*.fbcdn.net/*',
+                '*://*.fundingchoices.google.com/*',
+                '*://*.google-analytics.com/*',
+                '*://*.google.com/ads/*',
+                '*://*.google.com/adsense/*',
+                '*://*.googlesyndication.com/*',
+                '*://*.googletagmanager.com/*',
+                '*://*.googletagservices.com/*',
+                '*://*.gstatic.com/*',
+                '*://*.ie8eamus.com/*',
+                '*://*.lkqd.net/*',
+                '*://*.mgid.com/*',
+                '*://*.moatads.com/*',
+                '*://*.nakamasweb.com/*',
+                '*://*.onclasrv.com/*',
+                '*://*.pubmatic.com/*',
+                '*://*.pvclouds.com/*',
+                '*://*.revcontent.com/*',
+                '*://*.sascdn.com/*',
+                '*://*.scorecardresearch.com/*',
+                '*://*.sharethis.com/*',
+                '*://*.sitemaji.com/*',
+                '*://*.taboola.com/*',
+                '*://*.veruta.com/*',
+                '*://*.vidible.tv/*',
+                '*://*.vidoomy.com/*',
+                '*://*.yieldbird.com/*',
+                '*://*.yimg.com/*',
+                '*://*.luckypushh.com/*',
+                '*://*.dpypzvjarj.com/*'
+            ];
+        }
+
+        /**
+         * 
+         */
+        addPattern( pattern ) {
+            if( !this.patterns.includes( pattern ) ) {
+                this.patterns.push( pattern );
+            }
+        }
+    }
+
+</script>

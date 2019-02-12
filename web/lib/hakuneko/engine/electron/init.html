@@ -1,0 +1,17 @@
+<script>
+
+    if( typeof(process) !== 'undefined' && process.versions && process.versions.electron ) {
+
+        let electronRemote = require( 'electron' ).remote;
+
+        /**
+        * Register event listener to open developer console with F12 key.
+        */
+        window.addEventListener( 'keydown', ( e ) => {
+            if( !e.ctrlKey && !e.shiftKey && !e.altKey && e.keyCode === 123 ) {
+                electronRemote.getCurrentWindow().openDevTools();
+            }
+        });
+    }
+
+</script>

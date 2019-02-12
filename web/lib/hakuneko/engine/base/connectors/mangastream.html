@@ -1,0 +1,191 @@
+<link rel="import" href="../connector.html">
+
+<script>
+
+    /**
+     * @author Neogeek
+     */
+    class MangaStream extends Connector {
+
+        /**
+         *
+         */
+        constructor() {
+            super();
+            // Public members for usage in UI (mandatory)
+            super.id         = 'mangastream';
+            super.label      = 'MangaStream';
+            super.isLocked   = false;
+            this.initialized = undefined;
+            // Private members for internal usage only (convenience)
+            this.url         = 'https://readms.net';
+            // Private members for internal use that can be configured by the user through settings menu (set to undefined or false to hide from settings menu!)
+            this.config = undefined;
+
+            // register a protocol handler to intercept requests (with custom 'mangastream' protocol) and extract images
+            Engine.Request.registerProtocol( this.id, this._pageProtocolHandler.bind( this ) );
+        }
+
+        /**
+         *
+         */
+        _getMangaList( callback ) {
+            fetch( this.url + '/manga', this.requestOptions )
+            .then( response => {
+                if( response.status !== 200 ) {
+                    throw new Error( `Failed to receive manga list (status: ${response.status}) - ${response.statusText}` );
+                }
+                return response.text();
+            } )
+            .then( data => {
+                let dom = this.createDOM( data );
+                let mangaList = [...dom.querySelectorAll( 'table.table-striped tbody tr td strong a' )].map( element => {
+                    return {
+                        id: this.getRelativeLink( element ),
+                        title: element.text.trim()
+                    };
+                } );
+                callback( null, mangaList );
+            } )
+            .catch( error => {
+                console.error( error, this );
+                callback( error, undefined );
+            } );
+        }
+
+        /**
+         *
+         */
+        _getChapterList( manga, callback ) {
+            fetch( this.url + manga.id, this.requestOptions )
+            .then( response => {
+                if( response.status !== 200 ) {
+                    throw new Error( `Failed to receive chapter list (status: ${response.status}) - ${response.statusText}` );
+                }
+                return response.text();
+            } )
+            .then( data => {
+                let dom = this.createDOM( data );
+                let chapterList = [...dom.querySelectorAll( 'table.table-striped tbody tr td a' )].map( element => {
+                    return {
+                        id: this.getRelativeLink( element ),
+                        title: element.text.replace( manga.title, '' ).trim(),
+                        language: 'en'
+                    };
+                } );
+                callback( null, chapterList );
+            } )
+            .catch( error => {
+                console.error( error, manga );
+                callback( error, undefined );
+            } );
+        }
+
+        /**
+         *
+         */
+        _getPageList( manga, chapter, callback ) {
+            fetch( this.url + chapter.id, this.requestOptions )
+            .then( response => {
+                if( response.status !== 200 ) {
+                    throw new Error( `Failed to receive page list (status: ${response.status}) - ${response.statusText}` );
+                }
+                return response.text();
+            } )
+            .then( data => {
+                let dom = this.createDOM( data );
+                let pageList = [...dom.querySelectorAll( 'div.btn-reader-page ul.dropdown-menu li a' )].map( element => {
+                    let uri = new URL( this.url + this.getRelativeLink( element ) );
+                    uri.protocol = this.id;
+                    return uri.href;
+                } );
+                pageList = this._interpolatePages( pageList );
+                callback( null, pageList );
+            } )
+            .catch( error => {
+                console.error( error, chapter );
+                callback( error, undefined );
+            } );
+        }
+
+        /**
+         * Try to interpolate missing pages between last page and its preceding page
+         */
+        _interpolatePages( pageList ) {
+            let result = pageList;
+            try {
+                let last = result.length - 1;
+                let forelast = result.length - 2;
+                if( forelast < 0 ) {
+                    throw new Error( 'Cannot interpolate less than two pages!' );
+                }
+
+                let partsForelast = result[forelast].split( '/' );
+                forelast = parseInt( partsForelast.pop() );
+                partsForelast = partsForelast.join( '/' );
+
+                let partsLast = result[last].split( '/' );
+                last = parseInt( partsLast.pop() );
+                partsLast = partsLast.join( '/' );
+
+                if( partsForelast !== partsLast ) {
+                    throw new Error( 'Cannot interpolate non-sequiential URLs!' );
+                }
+                if( isNaN(last) || isNaN(forelast) ) {
+                    throw new Error( 'Cannot interpolate non-numeric sequences!' );
+                }
+                if( last - forelast < 2 ) {
+                    throw new Error( 'Cannot interpolate between consecutive numbers!' );
+                }
+                if( last - forelast > 100 ) {
+                    throw new Error( 'Cannot interpolate more than 100 pages (might be an unsupported sequence rule)!' );
+                }
+
+                result.pop();
+                for( let i = forelast+1; i<=last; i++ ) {
+                    result.push( `${partsLast}/${i}` );
+                }
+            } finally {
+                return result;
+            }
+        }
+
+        /**
+         * 
+         */
+        _pageProtocolHandler( request, callback ) {
+            let uri = new URL( request.url );
+            uri.protocol = ( new URL( this.url ) ).protocol;
+            this.requestOptions.headers.set( 'x-referer', this.url );
+            fetch( uri.href, this.requestOptions )
+            .then( response => {
+                if( response.status !== 200 ) {
+                    throw new Error( `Failed to receive page (status: ${response.status}) - ${response.statusText}` );
+                }
+                return response.text();
+            } )
+            .then( data => {
+                let dom = this.createDOM( data );
+                let source = this.getRelativeLink( dom.querySelector( '#manga-page' ) );
+                return fetch( source, this.requestOptions );
+            } )
+            .then( response => {
+                if( response.status !== 200 ) {
+                    throw new Error( `Failed to receive page (status: ${response.status}) - ${response.statusText}` );
+                }
+                return response.blob();
+            } )
+            .then( data => {
+                return this._blobToBuffer( data );
+            } )
+            .then( data => {
+                callback( data );
+            } )
+            .catch( error => {
+                console.error( error, uri.href );
+                callback( undefined );
+            } );
+        }
+    }
+
+</script>

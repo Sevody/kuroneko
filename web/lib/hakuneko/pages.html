@@ -1,0 +1,395 @@
+<link rel="import" href="../polymer/polymer-element.html">
+<link rel="import" href="../polymer/lib/elements/dom-repeat.html">
+<link rel="import" href="../polymer/lib/elements/dom-if.html">
+<link rel="import" href="engine/base/enums.html">
+<link rel="import" href="engine/loader.html">
+<link rel="import" href="theme.html">
+
+<dom-module id="hakuneko-pages">
+
+    <template>
+        <style include="theme"></style>
+        <style>
+            #container {
+                width: calc(100% - 2em);
+                height: calc(100% - 2em);
+                padding: 1em;
+                overflow-y: scroll;
+                background-image: var(--page-background-image);
+                background-size: cover;
+                background-repeat: no-repeat;
+                background-position: left top;
+                user-select: none;
+            }
+            .thumbnail {
+                display: inline-block;
+                border: var(--page-thumbnail-border);
+                background-color: var(--page-thumbnail-background-color);
+                background-position: center;
+                background-size: contain;
+                background-repeat: no-repeat;
+                border-radius: 1em;
+                margin: 0.5em;
+                width: 16em;
+                height: 16em;
+                cursor: pointer;
+                -webkit-box-shadow: var(--page-thumbnail-shadow);
+                   -moz-box-shadow: var(--page-thumbnail-shadow);
+                        box-shadow: var(--page-thumbnail-shadow);
+            }
+            .show {
+                display: block ;
+            }
+            .hide {
+                display: none;
+            }
+            .image {
+                display: block;
+                margin: 2em;
+                margin-left: auto;
+                margin-right: auto;
+            }
+            .buttons {
+                position: fixed;
+                top: 0;
+                right: 0;
+                padding-left: 1em;  
+                padding-right: 2.0em;
+                opacity: 0.1;
+                transition: opacity 0.25s;
+                background-color: var(--page-viewer-title-background-color);
+                border-bottom-left-radius: 1em;
+                box-shadow: var(--page-viewer-title-shadow);
+            }
+            .buttons:hover {
+                opacity: 1.0;
+            }
+            .buttons:hover > .title {
+                display: inline;
+            }
+            .title {
+                display: none;
+                font-weight: bold;
+                font-size: 1.25em;
+                color: var(--page-chapter-title-color);
+            }
+            .button {
+                cursor: pointer;
+                margin: 0.25em;
+            }
+            #video {
+                width: 100%;
+                background-color: rgba(0, 0, 0, 0.25);
+            }
+            /* hack to allow video to expand size when wrapped in subtitle container */
+            .ASS-container, .ASS-container svg {
+                width: 100% !important;
+            }
+            /* hack to show subtitles when video is in fullscreen mode */
+            .ASS-stage {
+                z-index: 2147483647;
+            }
+        </style>
+        <div id="container" style$="background-color: [[ getContainerColor(selectedMedia) ]];">
+            <template is="dom-if" if="[[ thumbnailViewMode(media,selectedMedia) ]]">
+                <template is="dom-repeat" items="[[ media ]]">
+                    <div class="thumbnail" style$="background-image: url('[[ escapeBackgroundURI(item) ]]');" on-click="showViewer" title$="Page [[ index ]]"></div>
+                </template>
+            </template>
+            <template is="dom-if" if="[[ pageViewMode(media,selectedMedia) ]]">
+                <div class="buttons">
+                    <span class="title">[[ selectedChapter.title ]]</span>
+                    <i class="fa fa-chevron-down fa-2x button" title="Chapter Down" on-click="requestChapterDown"></i>
+                    <i class="fa fa-chevron-up fa-2x button" title="Chapter Up" on-click="requestChapterUp"></i>
+                    &nbsp;
+                    <i class="fa fa-search-plus fa-2x button" title="Zoom In" on-click="zoomIn"></i>
+                    <i class="fa fa-search-minus fa-2x button" title="Zoom Out" on-click="zoomOut"></i>
+                    &nbsp;
+                    <i class="fa fa-times-circle fa-2x button" title="Close" on-click="hideViewer"></i>
+                </div>
+                <template is="dom-repeat" items="[[ media ]]" style="margin-top: 1.5em;">
+                    <img id$="page_[[ index ]]" class="image" src$="[[ item ]]" style$="width: [[ imageWidth ]]%;"></div>
+                </template>
+            </template>
+            <template is="dom-if" if="[[ videoViewMode(media,selectedMedia) ]]" on-dom-change="onVideoElementChanged">
+                <video id="video" controls controlsList="nodownload" on-click="onSelectedSubtitleChanged">
+                    <!-- dummy tracks to show subtitle menu in video player -->
+                    <template is="dom-repeat" items="[[ media.subtitles ]]">
+                        <track kind="subtitles" src="data:text/vtt," label$="[[ item.locale ]]" srclang$="[[ item.locale ]]" />
+                    </template>
+                </video>
+            </template>
+        </div>
+    </template>
+
+    <script>
+        /** @polymerElement */
+        class HakunekoPages extends Polymer.Element {
+            /**
+             *
+             */
+            static get is() {
+                return 'hakuneko-pages';
+            }
+
+            /**
+             *
+             */
+            static get properties() {
+                return {
+                    selectedChapter: {
+                        type: Object,
+                        value: undefined,
+                        observer: 'onSelectedChapterChanged'
+                    },
+                    selectedMedia: {
+                        type: Number,
+                        value: -1,
+                        notify: true // enable upward data flow
+                        //readOnly: true // prevent downward data flow
+                    }
+                };
+            }
+
+            /**
+             *
+             */
+            ready() {
+                super.ready();
+                this.media = undefined;
+                this.selectedMedia = -1;
+                this.selectedSubtitle = -1;
+                this.imageWidth = 75;
+                this.hls = undefined;
+                this.ass = undefined;
+                this.videoResizeObserver = new ResizeObserver( this.onVideoResized.bind( this ) );
+            }
+
+            /**
+             * Observer will be executed, whenever the 'selectedChapter' is changed.
+             */
+            onSelectedChapterChanged( chapter ) {
+                this.set( 'media', undefined );
+                if( !chapter ) {
+                    return;
+                }
+                // TODO: abort any pending page request (maybe store current request in global variable?)
+                chapter.getPages( ( error, media ) => {
+                    if( chapter === this.selectedChapter ) {
+                        this.set( 'media', media );
+                        if( error ) {
+                            alert( error.message );
+                        }
+                    }
+                } );
+                this.resetSubtitles( true );
+            }
+
+            /**
+             * 
+             */
+            resetSubtitles( clearTracks ) {
+                this.selectedSubtitle = -1;
+                if( this.ass ) {
+                    this.ass.destroy();
+                    this.ass = undefined;
+                }
+                if( clearTracks ) {
+                    let element = this.shadowRoot.querySelector( '#video' );
+                    if( element ) {
+                        let tracks = element.textTracks;
+                        let i = 0;
+                        while( tracks[i] ) {
+                            tracks[i].mode = 'disabled';
+                            i++;
+                        }
+                    }
+                }
+            }
+
+            /**
+             *
+             */
+            onSelectedSubtitleChanged( event ) {
+//console.log( 'onSelectedSubtitleChanged:', event );
+                let element = event.path[0];
+                let tracks = element.textTracks;
+                // Yield with timeout, so UI can update its element before we access it ...
+                setTimeout( () => {
+                    // assumption: tracks are in same order as subtitles ...
+                    let subtitle = -1;
+                    for( let index = 0; index < this.media.subtitles.length; index++ ) {
+                        if( tracks[index].mode === 'showing' ) {
+                            subtitle = index;
+                            break;
+                        }
+                    }
+                    if( this.selectedSubtitle !== subtitle ) {
+                        this.resetSubtitles( false ); // NOTE: this will also set this.selectedSubtitle to -1
+                        this.selectedSubtitle = subtitle;
+                        if( subtitle > -1 ) {
+                            let sub = this.media.subtitles[this.selectedSubtitle];
+//console.log( 'SUBTITLE:', sub );
+                            if( sub.content ) {
+                                this.ass = new ASS( sub.content, element );
+                            } else {
+                                fetch( sub.url )
+                                .then( response => {
+                                    if( response.status !== 200 ) {
+                                        throw new Error();
+                                    }
+                                    return response.text();
+                                } )
+                                .then( data => {
+                                    sub.content = data;
+                                    this.ass = new ASS( sub.content, element );
+                                } )
+                                .catch( error => {
+                                    console.warn( error, sub.url );
+                                } );
+                            }
+                        }
+                    }
+                }, 250 );
+            }
+
+            /**
+             *
+             */
+            showViewer( event ) {
+                this.set( 'selectedMedia', event.model.index);
+                this.set( 'viewerStyle.bgImage', this.media[this.selectedMedia] );
+                // embed in timeout function to ensure image layout is updated before adjusting scroll offsetTop
+                setTimeout( () => {
+                    // find offset for image with id=selectedMedia and scroll to page
+                    this.$.container.scrollTop = this.$.container.querySelector('#page_' + this.selectedMedia).offsetTop;
+                }, 0 );
+            }
+
+            /**
+             *
+             */
+            hideViewer( event ) {
+                this.set( 'selectedMedia', -1 );
+                this.$.container.scrollTop = 0;
+            }
+
+            /**
+             *
+             */
+            getContainerColor( selectedMedia ) {
+                return ( ( selectedMedia > -1 ) ? 'var(--page-reader-background-color)' : 'var(--page-control-background-color)' );
+            }
+
+            /**
+            *
+            */
+            thumbnailViewMode( media, selectedMedia ) {
+                return ( media && media.length && selectedMedia < 0 );
+            }
+
+            /**
+             *
+             */
+            pageViewMode( media, selectedMedia ) {
+                return ( media instanceof Array && selectedMedia > -1 );
+            }
+
+            /**
+             *
+             */
+            videoViewMode( media, selectedMedia ) {
+                return ( media && ( media.mirrors instanceof Array || typeof media.video === 'string' ) );
+            }
+
+            /**
+             * 
+             */
+            escapeBackgroundURI( uri ) {
+                return uri.replace( /'/g, '\\\'' );
+            }
+
+            /**
+             *
+             */
+            onVideoElementChanged( event ) {
+                this.resetSubtitles( true );
+                let element = this.shadowRoot.querySelector( '#video' );
+//console.log( 'VIDEO', element, element.querySelector( 'input::-webkit-media-controls-toggle-closed-captions-button' ) );
+                if( element ) {
+                    element.pause();
+                    // destroying seems the only way to flush buffers and prevent packets from the previous stream being played
+                    if( this.hls ) {
+                        this.hls.destroy();
+                    }
+                    element.src = '';
+                    if( this.media && this.media.mirrors ) {
+                        // TODO: select random mirror?
+                        this.hls = new Hls();
+                        this.hls.attachMedia( element );
+                        this.hls.loadSource( this.media.mirrors[0] );
+                    }
+                    if( this.media && this.media.video ) {
+                        element.src = this.media.video;
+                    }
+                    this.videoResizeObserver.observe( element );
+                }
+            }
+
+            /**
+             *
+             */
+            onVideoResized( e ) {
+                if( this.ass ) {
+                    this.ass.resize();
+                }
+            }
+
+            /**
+             * fire event to request the next chapter
+             */
+            requestChapterUp( event ) {
+                document.dispatchEvent( new CustomEvent( EventListener.onRequestChapterUp, { detail: this.selectedChapter } ) );
+            }
+
+            /**
+             * fire event to request the previous chapter
+             */
+            requestChapterDown( event ) {
+                document.dispatchEvent( new CustomEvent( EventListener.onRequestChapterDown, { detail: this.selectedChapter } ) );
+            }
+
+            /**
+             *
+             */
+            zoomIn( event ) {
+                let scale = this.imageWidth + 15;
+                this.zoom( ( scale > 400 ? 400 : scale ) );
+            }
+
+            /**
+             *
+             */
+            zoomOut( event ) {
+                let scale = this.imageWidth - 15;
+                this.zoom( ( scale < 25 ? 25 : scale ) );
+            }
+
+            /**
+             *
+             */
+            zoom( scale ) {
+                let previousHeight = this.$.container.scrollHeight;
+                let previousOffset = this.$.container.scrollTop;
+                this.set( 'imageWidth', scale );
+                // embed in timeout function to ensure layout is updated before adjusting offsetY
+                //setTimeout( function() {
+                    // adjust new offsetY depending on height changed ratio of container after scaling images
+                    this.$.container.scrollTop = previousOffset * this.$.container.scrollHeight / previousHeight;
+                //}.bind( this ), 0 );
+            }
+        }
+        window.customElements.define( HakunekoPages.is, HakunekoPages );
+    </script>
+
+</dom-module>

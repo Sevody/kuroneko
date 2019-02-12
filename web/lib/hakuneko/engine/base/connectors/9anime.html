@@ -1,0 +1,250 @@
+<link rel="import" href="../connector.html">
+
+<script>
+
+    /**
+     * 
+     */
+    class NineAnime extends Connector {
+
+        /**
+         *
+         */
+        constructor() {
+            super();
+            // Public members for usage in UI (mandatory)
+            super.id         = '9anime';
+            super.label      = '9ANIME';
+            this.tags        = [ 'anime', 'english' ];
+            super.isLocked   = false;
+            this.initialized = undefined;
+            // Private members for internal usage only (convenience)
+            this.url         = 'https://www2.9anime.to';
+            // Private members for internal use that can be configured by the user through settings menu (set to undefined or false to hide from settings menu!)
+            this.config = {
+                resolution:  {
+                    label: 'Preferred Resolution',
+                    description: 'Try to download video in the selected resolution.\nIf the resolution is not supported, the video will fail!',
+                    input: Input.select,
+                    options: [
+                        { value: '', name: 'Mirror\'s Default' },
+                        { value: '240', name: '240p' },
+                        { value: '360', name: '360p' },
+                        { value: '480', name: '480p' },
+                        { value: '720', name: '720p' },
+                        { value: '1080', name: '1080p' }
+                    ],
+                    value: ''
+                }
+            };
+        }
+
+        /**
+         *
+         */
+         _getMangaListFromPages( mangaPageLinks, index ) {
+            if( index === undefined ) {
+                index = 0;
+            }
+            return this.wait( 0 )
+            .then ( () => this.fetchDOM( mangaPageLinks[ index ], 'div.film-list div.item div.inner a.name', 5 ) )
+            .then( data => {
+                let mangaList = data.map( element => {
+                    return {
+                        id: this.getRelativeLink( element ),
+                        title: element.text.trim()
+                    };
+                } );
+                if( index < mangaPageLinks.length - 1 ) {
+                    return this._getMangaListFromPages( mangaPageLinks, index + 1 )
+                    .then( mangas => mangas.concat( mangaList ) );
+                } else {
+                    return Promise.resolve( mangaList );
+                }
+            } );
+        }
+
+        /**
+         *
+         */
+        _getMangaList( callback ) {
+            this.fetchDOM( this.url + '/filter', 'div.paging-wrapper form span.total' )
+            .then( data => {
+                let pageCount = parseInt( data[0].textContent.trim() );
+                let pageLinks = [...( new Array( pageCount ) ).keys()].map( page => this.url + '/filter?page=' + ( page + 1 ) );
+                return this._getMangaListFromPages( pageLinks );
+            } )
+            .then( data => {
+                callback( null, data );
+            } )
+            .catch( error => {
+                console.error( error, this );
+                callback( error, undefined );
+            } );
+        }
+
+        /**
+         *
+         */
+        _getChapterList( manga, callback ) {
+            let script = `
+            new Promise((resolve, reject) => {
+                setTimeout(() => {
+                    let servers = [...document.querySelectorAll( 'div#servers-container div.servers span.tabs span.tab' )].map(span => {
+                        let id = span.dataset['name'];
+                        return {
+                            id: id,
+                            label: span.textContent.trim(),
+                            episodes: [...document.querySelectorAll( 'div#servers-container div.servers div.server[data-name="' + id + '"] ul.episodes li a' )].map(a => {
+                                return {
+                                    url: a.href,
+                                    title: a.text.trim()
+                                };
+                            } )
+                        };
+                    } );
+                    resolve(servers);
+                }, 2500);
+            } )
+            `;
+            Engine.Request.fetchUI( this.url + manga.id, this.requestOptions, script )
+            .then( result => {
+                let chapterList = result.reduce( ( accumulator, server ) => {
+                    let episodes = server.episodes.map(episode => {
+                        return {
+                            id: '/ajax/episode/info?server=' + server.id + '&id=' + episode.url.split( '/' ).pop(),
+                            title: `${episode.title} [${server.label}]`,
+                            language: ''
+                        };
+                    } );
+                    return accumulator.concat( episodes );
+                }, [] );
+                callback( null, chapterList );
+            } )
+            .catch( error => {
+                console.error( error, manga );
+                callback( error, undefined );
+            } );
+        }
+
+        /**
+         *
+         */
+        _getPageList( manga, chapter, callback ) {
+            this.requestOptions.headers.set( 'x-referer', this.url );
+            return fetch( ( this.url + chapter.id + '&ts=' + Date.now() ).slice( 0, -3 ), this.requestOptions )
+            .then( response => {
+                if( response.status !== 200 ) {
+                    throw new Error( `Failed to receive JSON (status: ${response.status}) - ${response.statusText}` );
+                }
+                return response.json();
+            } )
+            .then( data => {
+                switch(true) {
+                    case data.target.includes( 'rapidvideo.com' ):
+                        return this._getEpisodeRapidVideo( data.target, this.config.resolution.value );
+                    case data.target.includes( 'openload.co' ):
+                        return this._getEpisodeOpenLoad( data.target, this.config.resolution.value );
+                    case data.target.includes( 'mcloud.to' ):
+                        return this._getEpisodeMyCloud( data.target, this.config.resolution.value );
+                    case data.target.includes( 'mp4upload.com' ):
+                        return this._getEpisodeMp4upload( data.target, this.config.resolution.value );
+                    case data.target.includes( 'streamango.com' ):
+                        return this._getEpisodeStreamango( data.target, this.config.resolution.value );
+                    default:
+                        throw new Error( 'Support for video stream from mirror "' + data.target + '" not implemented!' );
+                }
+            } )
+            .then( media => {
+                this.requestOptions.headers.delete( 'x-referer' );
+                callback( null, media );
+            } )
+            .catch( error => {
+                this.requestOptions.headers.delete( 'x-referer' );
+                console.error( error, chapter );
+                callback( error, undefined );
+            } );
+        }
+
+        /**
+         *
+         */
+        _getEpisodeRapidVideo( link, resolution ) {
+            link += ( resolution ? `?q=${resolution}p` : '' );
+            return this.fetchDOM( link, 'video#videojs source' )
+            .then( data => {
+                return Promise.resolve( { video: data[0].src, subtitles: [] } );
+            } );
+        }
+
+        /**
+         *
+         */
+        _getEpisodeOpenLoad( link, resolution ) {
+            let script = `
+                document.querySelector('div#videooverlay').click();
+                document.querySelector('video[id^="olvideo"]').src;
+            `;
+            return Engine.Request.fetchUI( link, this.requestOptions, script )
+            .then( stream => {
+                return Promise.resolve( { video: stream, subtitles: [] } );
+            } );
+        }
+
+        /**
+         *
+         */
+        _getEpisodeMyCloud( link, resolution ) {
+            // NOT WORKING: HLS Playlist with relative links
+            console.log( link );
+            this.requestOptions.headers.set( 'x-referer', this.url );
+            let promise = fetch( link, this.requestOptions )
+            .then( response => response.text() )
+            .then( result => {
+                let playlist = result.match( /sources\s*:\s*\[\s*\{\s*"file"\s*:\s*"(.*?)"/ )[1];
+                console.log( playlist ); // https://cdn.mcloud.to/stream/sa:i0:q2:h0:p27:l0/yPRztQKp4bqHIABGvB2ZoQ/1549472400/a/d/0/jj0603/list.m3u8
+                this.requestOptions.headers.set( 'x-referer', link );
+                let promise = fetch( playlist, this.requestOptions )
+                .then( response => response.text() )
+                .then( streamlist => {
+                    /*
+                    #EXTM3U
+
+                    #EXT-X-STREAM-INF:PROGRAM-ID=1, BANDWIDTH=1200000, RESOLUTION=854x480
+                    hls/480/480.m3u8
+                    */
+                    // => https://cdn.mcloud.to/stream/sa:i0:q2:h0:p27:l0/yPRztQKp4bqHIABGvB2ZoQ/1549472400/a/d/0/jj0603/hls/480/480.m3u8
+                    let playlist = playlist.replace( /[^\/]+$/, 'hls/480/480.m3u8' );
+                    console.log( streamlist, playlist  );
+                    throw new Error( 'Support for mirror "MyCloud" not implemented!' );
+                } );
+                this.requestOptions.headers.delete( 'x-referer' );
+                return promise;
+            } );
+            this.requestOptions.headers.delete( 'x-referer' );
+            return promise;
+        }
+
+        /**
+         *
+         */
+        _getEpisodeMp4upload( link, resolution ) {
+            // NOT WORKING: missing content-length header when downloading stream (fetch CORS problem)
+            return Engine.Request.fetchUI( link, this.requestOptions, `document.querySelector('div#player div.jw-media video.jw-video').src;` )
+            .then( stream => {
+                return Promise.resolve( { video: stream, subtitles: [] } );
+            } );
+        }
+
+        /**
+         *
+         */
+        _getEpisodeStreamango( link, resolution ) {
+            return Engine.Request.fetchUI( link, this.requestOptions, `document.querySelector('video[id^="mgvideo"]').src;` )
+            .then( stream => {
+                return Promise.resolve( { video: stream, subtitles: [] } );
+            } );
+        }
+    }
+
+</script>

@@ -1,0 +1,161 @@
+<link rel="import" href="../connector.html">
+
+<script>
+
+    /**
+     *
+     */
+    class ReadComicBooksOnline extends Connector {
+
+        /**
+         *
+         */
+        constructor() {
+            super();
+            // Public members for usage in UI (mandatory)
+            super.id         = 'readcomicbooksonline';
+            super.label      = 'ReadComicBooksOnline';
+            super.isLocked   = false;
+            this.initialized = undefined;
+            // Private members for internal usage only (convenience)
+            this.url         = 'https://readcomicbooksonline.org';
+            this.urlOld      = 'http://readcomicbooksonline.com';
+            // Private members for internal use that can be configured by the user through settings menu (set to undefined or false to hide from settings menu!)
+            this.config = undefined;
+
+            // register a protocol handler to intercept requests (with custom 'readcomicbooksonline' protocol) and extract images
+            Engine.Request.registerProtocol( this.id, this._pageProtocolHandler.bind( this ) );
+        }
+
+        /**
+         *
+         */
+        _getMangaList( callback ) {
+            let promises = ['/comics-list', '/manga-list'].map( page => {
+                return fetch( this.url + page, this.requestOptions )
+                .then( response => {
+                    if( response.status !== 200 ) {
+                        throw new Error( `Failed to receive manga list (status: ${response.status}) - ${response.statusText}` );
+                    }
+                    return response.text();
+                } )
+                .then( data => {
+                    let dom = this.createDOM( data );
+                    let mangaList = [...dom.querySelectorAll( 'div.content table tr td span a' )].map( element => {
+                        return {
+                            id: this.getRelativeLink( element ).replace( this.urlOld, '' ),
+                            title: element.text.trim()
+                        };
+                    } );
+                    return Promise.resolve( mangaList );
+                } );
+            } );
+
+            Promise.all( promises )
+            .then( mangas => {
+                callback( null, [].concat( ... mangas ) );
+            } )
+            .catch( error => {
+                console.error( error, this );
+                callback( error, undefined );
+            } );
+        }
+
+        /**
+         *
+         */
+        _getChapterList( manga, callback ) {
+            fetch( this.url + manga.id, this.requestOptions )
+            .then( response => {
+                if( response.status !== 200 ) {
+                    throw new Error( `Failed to receive chapter list (status: ${response.status}) - ${response.statusText}` );
+                }
+                return response.text();
+            } )
+            .then( data => {
+                let dom = this.createDOM( data );
+                let chapterList = [...dom.querySelectorAll( 'div[id$="chapterlist"] li.chapter a' )].map( element => {
+                    let id = this.getRelativeLink( element ).replace( this.urlOld, '' );
+                    return {
+                        id: id + ( id.startsWith( '/readmanga/' ) ? '' : '/?q=fullchapter' ),
+                        title: element.text.replace( manga.title, '' ).trim(),
+                        language: 'en'
+                    };
+                } ).filter( c => c.title !== '' );
+                callback( null, chapterList );
+            } )
+            .catch( error => {
+                console.error( error, manga );
+                callback( error, undefined );
+            } );
+        }
+
+        /**
+         *
+         */
+        _getPageList( manga, chapter, callback ) {
+            let isManga = chapter.id.startsWith( '/readmanga/' );
+            fetch( this.url + chapter.id, this.requestOptions )
+            .then( response => {
+                if( response.status !== 200 ) {
+                    throw new Error( `Failed to receive page list (status: ${response.status}) - ${response.statusText}` );
+                }
+                return response.text();
+            } )
+            .then( data => {
+                let dom = this.createDOM( data );
+                let pageList = [];
+                if( isManga ) {
+                    pageList = [...dom.querySelectorAll( 'source.mangapic' )].map( element => {
+                        return ( element.src.replace( this.urlOld, '' ) );
+                    } );
+                } else {
+                    pageList = [...dom.querySelectorAll( 'table tr:nth-of-type(3) td source' )].map( ( element, index ) => {
+                        let uri = new URL( this.url + '/reader' + this.getRelativeLink( element ).replace( this.urlOld, '' ) );
+                        uri.protocol = this.id;
+                        uri.searchParams.append( 'referer', this.url + chapter.id );
+                        uri.searchParams.append( 'delay', index * 100 );
+                        return uri.href;
+                    } );
+                }
+                callback( null, pageList );
+            } )
+            .catch( error => {
+                console.error( error, chapter );
+                callback( error, undefined );
+            } );
+        }
+
+        /**
+         * 
+         */
+        _pageProtocolHandler( request, callback ) {
+            let uri = new URL( request.url );
+            uri.protocol = ( new URL( this.url ) ).protocol;
+            let delay = parseInt( uri.searchParams.get( 'delay' ) );
+            uri.searchParams.delete( 'delay' );
+            this.requestOptions.headers.set( 'x-referer', uri.searchParams.get( 'referer' ) );
+            uri.searchParams.delete( 'referer' );
+
+            this.wait( delay )
+            .then( () => fetch( uri.href, this.requestOptions ) )
+            .then( response => {
+                if( response.status !== 200 ) {
+                    throw new Error( `Failed to receive page (status: ${response.status}) - ${response.statusText}` );
+                }
+                return response.blob();
+            } )
+            .then( data => {
+                return this._blobToBuffer( data );
+            } )
+            .then( data => {
+                callback( data );
+            } )
+            .catch( error => {
+                console.error( error, uri.href );
+                callback( undefined );
+            } );
+        }
+    }
+
+</script>

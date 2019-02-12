@@ -1,0 +1,260 @@
+<link rel="import" href="../base/request.html">
+<link rel="import" href="../base/useragent.html">
+
+<script>
+
+    /**
+     *
+     */
+    class RequestElectron extends RequestBase {
+
+        /**
+         *
+         */
+        constructor( blacklist ) {
+            super();
+            let electron = require( 'electron' );
+            this.webframe = electron.webFrame;
+            this.electronRemote = electron.remote;
+            this.protocol = this.electronRemote.require( 'electron' ).protocol;
+            this.browser = this.electronRemote.BrowserWindow;
+            this.userAgent = UserAgent.random();
+            this.blacklist = blacklist;
+
+            // register 'cache' as privileged to allow this protocol be used with fetch API (otherwise only http[s] is allowed)
+            // this cannot be done in main process of electron, so it is done here ...
+            this.webframe.registerURLSchemeAsPrivileged( 'cache' );
+            
+            document.addEventListener( EventListener.onSettingsChanged, this.onSettingsChanged.bind( this ) );
+        }
+
+        /**
+         *
+         */
+        onSettingsChanged( event ) {
+            // set google data saver for electron browser window requests
+            let proxy = {};
+            if( event.detail.useGoogleDataSaver.value ) {
+                proxy['proxyRules'] = 'http=http://proxy.googlezip.net:80';
+                //proxy['proxyBypassRules'] = [ 'https://*' ];
+            }
+            this.electronRemote.session.defaultSession.setProxy( proxy, () => {
+                //console.log( 'SET PROXY:', proxy );
+            } );
+        }
+
+        /**
+         *
+         */
+        registerProtocol( scheme, callback ) {
+            // register scheme as privileged to allow this protocol be used with fetch API (otherwise only http[s] is allowed)
+            this.webframe.registerURLSchemeAsPrivileged( scheme );
+            // register callback for electron process (when callback becomes unavailable by e.g. reloading page,
+            // the previous registered handler must be removed)
+            this.protocol.isProtocolHandled( scheme, error => {
+                if( error ) {
+                    this.protocol.unregisterProtocol( scheme, event => {
+                        this.protocol.registerBufferProtocol( scheme, callback );
+                    } );
+                } else {
+                    this.protocol.registerBufferProtocol( scheme, callback );
+                }
+            } );
+        }
+
+        /**
+         *
+         */
+        _cfCheckScript() {
+            // ensure variables in this script does not appear in the page or other injected script
+            let uVar = [
+                '_c13367', // 'code',
+                '_d8fd50', // 'message',
+                '_cb5e10', // 'error',
+                '_e9a23c', // 'meta',
+                '_d9904d', // 'cf',
+                '_b4a884', // 'result',
+            ];
+            return `
+                let ${uVar[0]} = document.querySelector( '.cf-error-code' );
+                ${uVar[0]} = ( ${uVar[0]} ? ${uVar[0]}.innerText : null );
+                let ${uVar[1]} = document.querySelector( 'h2[data-translate]' );
+                ${uVar[1]} = ( ${uVar[1]} && ${uVar[1]}.nextElementSibling ? ${uVar[1]}.nextElementSibling.innerText : null );
+                let ${uVar[2]} = ( ${uVar[0]} ? 'CF Error ' + ${uVar[0]} + ' => ' + ${uVar[1]} : null );
+
+                let ${uVar[3]} = document.querySelector( 'meta[http-equiv="refresh"][content*="="]' );
+                let ${uVar[4]} = document.querySelector( 'form#challenge-form' );
+
+                let ${uVar[5]} = {
+                    error: ${uVar[0]},
+                    redirect: ( ${uVar[3]} || ${uVar[4]} )
+                };
+                ${uVar[5]};
+            `;
+        }
+
+        /**
+         * If timeout [ms] is given, the window will be kept open until timout, otherwise
+         * it will be closed after injecting the script (or after 25 seconds in case an error occured)
+         */
+        fetchUI( url, requestOptions, injectionScript, timeout ) {
+            return new Promise( ( resolve, reject ) => {
+                let win = new this.browser( {
+                    show: false,
+                    webPreferences: {
+                        nodeIntegration: false,
+                        webSecurity: true
+                    }
+                } );
+                //win.webContents.openDevTools();
+                win.webContents.session.webRequest.onBeforeRequest( { urls: this.blacklist.patterns }, ( details, callback ) => {
+                    callback( { cancel: true } );
+                } );
+
+                let preventCallback = false;
+
+                let abortAction = setTimeout( () => {
+                    this._fetchUICleanup( win, abortAction );
+                    if( !preventCallback ) {
+                        reject( new Error( 'Failed to load ' + url ) );
+                    }
+                }, ( timeout ? timeout : 25000 ) );
+
+                win.webContents.on( 'did-finish-load', event => {
+                    win.webContents.executeJavaScript( this._cfCheckScript() )
+                    .then( result => {
+                        if( !result.redirect ) {
+                            preventCallback = true; // no other event shall resolve/reject this promise anymore
+                            if( result.error ) {
+                                throw new Error( result.error );
+                            } else {
+                                win.webContents.executeJavaScript( injectionScript )
+                                .then( result => {
+                                    if( !timeout ) {
+                                        this._fetchUICleanup( win, abortAction );
+                                    }
+                                    resolve( result );
+                                } );
+                            }
+                        } else {
+                            // neither reject nor resolve the promise (wait for next callback after getting redirected)
+                        }
+                    } )
+                    .catch( error => {
+                        this._fetchUICleanup( win, abortAction );
+                        reject( error );
+                    } );
+                } );
+
+                win.webContents.on( 'did-fail-load', ( event, errCode, errMessage, uri, isMain ) => {
+                    // this will get called whenever any of the requests is blocked by the client (e.g. by the blacklist feature)
+                    if( !preventCallback && errCode && errCode !== -3 && ( isMain || uri === url ) ) {
+                        this._fetchUICleanup( win, abortAction );
+                        reject( new Error( errMessage + ' ' + uri ) );
+                    }
+                } );
+
+                win.loadURL( url/*, options*/ );
+            } );
+        }
+
+        /**
+         * Close window and clear the given timeout function
+         */
+        _fetchUICleanup( browserWindow, abortAction ) {
+            if( abortAction ) {
+                clearTimeout( abortAction );
+            }
+            abortAction = null;
+            if( browserWindow ) {
+                browserWindow.close();
+            }
+            browserWindow = null;
+        }
+
+        /**
+         * Generate content of 'Chrome-Proxy' header field for use with google data saver
+         */
+        _getDataSaverHeader() {
+            let key = 'ac4500dd3b7579186c1b0620614fdb1f7d61f944';
+            let ts = Math.floor( Date.now() / 1000 );
+            //let hash = this.crypto.createHash( 'md5' ).update( ts + key + ts ).digest( 'hex' );
+            let hash = CryptoJS.MD5( ts + key + ts ).toString( CryptoJS.enc.Hex );
+            let rd = Math.floor( 9999 * Math.random() );
+            return 'ps=' + [ ts, rd, rd, rd ].join( '-' ) + ', sid=' + hash + ', b=3239, p=132, c=linux';
+        }
+
+        /**
+         * Provide headers for the electron main process that shall be modified before every BrowserWindow request is made.
+         * DO NOT RENAME THIS METHOD!
+         */
+         onBeforeSendHeadersHandler( details ) {
+            try {
+                details = JSON.parse( Buffer.from( details, 'base64' ).toString( 'utf8' ) );
+            } catch( error ) {
+                console.log( error, details );
+                return undefined;
+            }
+            let uri = new URL( details.url );
+            //console.log( uri );
+            // remove accidently added headers from opened developer console
+            for( let header in details.requestHeaders ) {
+                if( header.startsWith( 'X-DevTools' )  ) {
+                    delete details.requestHeaders[header];
+                }
+            }
+
+            // Overwrite the Host header with the one provided by the connector
+            if( details.requestHeaders['x-host'] ) {
+                details.requestHeaders['Host'] = details.requestHeaders['x-host'];
+            }
+            delete details.requestHeaders['x-host'];
+
+            // Overwrite electron's default User-Agent header ( "Mozilla/5.0 ... electron ..." )
+            if( details.requestHeaders['User-Agent'].toLowerCase().indexOf( 'electron' ) > -1 ) {
+                details.requestHeaders['User-Agent'] = this.userAgent;
+            }
+            // Overwrite the User-Agent header with the one provided by the connector
+            if( details.requestHeaders['x-user-agent'] ) {
+                details.requestHeaders['User-Agent'] = details.requestHeaders['x-user-agent'];
+            }
+            // Overwrite the User-Agent header for certain domains
+            if( 'www.mnggo.net|www.fashionlib.net|www.lady-first.me'.indexOf( uri.host ) > -1 ) {
+                details.requestHeaders['User-Agent'] = this.userAgent; // UserAgent.random();
+            }
+            delete details.requestHeaders['x-user-agent'];
+
+            // Overwrite the Referer header, but
+            // NEVER overwrite the referer for cloudflare's DDoS protection to prevent infinite redirects!
+            if( !uri.pathname.endsWith( 'chk_jschl' ) && details.requestHeaders['x-referer'] ) {
+                // use referer provided by connector
+                details.requestHeaders['Referer'] = details.requestHeaders['x-referer'];
+            }
+            delete details.requestHeaders['x-referer'];
+
+            // Overwrite the Origin header
+            if( details.requestHeaders['x-origin'] ) {
+                details.requestHeaders['Origin'] = details.requestHeaders['x-origin'];
+            }
+            delete details.requestHeaders['x-origin'];
+
+            // Append Cookie header
+            if( details.requestHeaders['x-cookie'] ) {
+                let cookiesORG = ( details.requestHeaders['Cookie'] || '' ).split( ';' ).map( c => c.trim() );
+                let cookiesNEW = details.requestHeaders['x-cookie'].split( ';' ).map( c => c.trim() );
+                details.requestHeaders['Cookie'] = cookiesORG.concat( cookiesNEW ).join( '; ' );
+            }
+            delete details.requestHeaders['x-cookie'];
+
+            if( uri.protocol === 'http:' && Engine.Settings.useGoogleDataSaver.value ) {
+                details.requestHeaders['Chrome-Proxy'] = this._getDataSaverHeader();
+            }
+/*
+if( 'mangapicgallery'.indexOf( uri.host ) > -1 && uri.pathname.endsWith( '/1/' ) ) {
+// console.log( uri, details );
+*/
+            return details;
+        }
+    }
+
+</script>
